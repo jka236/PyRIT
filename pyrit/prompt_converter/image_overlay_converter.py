@@ -9,6 +9,7 @@ from PIL import Image
 
 from pyrit.identifiers import ComponentIdentifier
 from pyrit.models import PromptDataType, data_serializer_factory
+from pyrit.models.data_type_serializer import DataTypeSerializer
 from pyrit.prompt_converter.prompt_converter import ConverterResult, PromptConverter
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,9 @@ class ImageOverlayConverter(PromptConverter):
         self._position = position
         self._overlay_size = overlay_size
         self._opacity = opacity
+
+        mime_type = DataTypeSerializer.get_mime_type(self._base_image) or "image/png"
+        self._image_type = mime_type.split("/")[-1]
 
     def _build_identifier(self) -> ComponentIdentifier:
         """
@@ -137,10 +141,11 @@ class ImageOverlayConverter(PromptConverter):
         result_img = self._composite_images(base=base_img, overlay=overlay_img)
 
         image_bytes = BytesIO()
-        mime_type = base_serializer.get_mime_type(prompt) or "image/png"
-        image_type = mime_type.split("/")[-1]
-        result_img.save(image_bytes, format=image_type)
+        result_img.save(image_bytes, format=self._image_type)
         image_str = base64.b64encode(image_bytes.getvalue()).decode("utf-8")
 
-        await base_serializer.save_b64_image(data=image_str)
-        return ConverterResult(output_text=str(base_serializer.value), output_type="image_path")
+        output_serializer = data_serializer_factory(
+            category="prompt-memory-entries", data_type="image_path", extension=self._image_type
+        )
+        await output_serializer.save_b64_image(data=image_str)
+        return ConverterResult(output_text=str(output_serializer.value), output_type="image_path")

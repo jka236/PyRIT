@@ -65,7 +65,11 @@ class ImageOverlayConverter(PromptConverter):
         self._opacity = opacity
 
         mime_type = DataTypeSerializer.get_mime_type(self._base_image) or "image/png"
-        self._image_type = mime_type.split("/")[-1]
+        image_type = mime_type.split("/")[-1].lower()
+        # PIL/Pillow uses "JPEG" as the save format; normalize the file extension to "jpg"
+        # to match the convention used by other image converters.
+        self._save_format = "jpeg" if image_type in ("jpg", "jpeg") else image_type
+        self._file_extension = "jpg" if image_type in ("jpg", "jpeg") else image_type
 
     def _build_identifier(self) -> ComponentIdentifier:
         """
@@ -87,6 +91,10 @@ class ImageOverlayConverter(PromptConverter):
         """
         Composite the overlay image onto the base image.
 
+        Preserves the alpha channel when the output format supports it (PNG, WEBP).
+        For formats without alpha support (JPEG), the result is flattened onto a
+        white background so transparent regions render predictably.
+
         Args:
             base (Image.Image): The base image.
             overlay (Image.Image): The overlay image to place on the base.
@@ -104,9 +112,23 @@ class ImageOverlayConverter(PromptConverter):
             alpha = alpha.point(lambda a: int(a * self._opacity))
             overlay.putalpha(alpha)
 
+        overlay_w, overlay_h = overlay.size
+        x, y = self._position
+        if x + overlay_w <= 0 or y + overlay_h <= 0 or x >= base.width or y >= base.height:
+            logger.warning(
+                f"Overlay at position {self._position} with size ({overlay_w}, {overlay_h}) "
+                f"falls entirely outside the base image ({base.width}x{base.height}); "
+                "result will be unchanged from the base."
+            )
+
         base = base.convert("RGBA")
         base.paste(overlay, self._position, mask=overlay)
-        return base.convert("RGB")
+
+        if self._save_format == "jpeg":
+            background = Image.new("RGB", base.size, (255, 255, 255))
+            background.paste(base, mask=base.split()[-1])
+            return background
+        return base
 
     async def convert_async(self, *, prompt: str, input_type: PromptDataType = "image_path") -> ConverterResult:
         """
@@ -141,11 +163,11 @@ class ImageOverlayConverter(PromptConverter):
         result_img = self._composite_images(base=base_img, overlay=overlay_img)
 
         image_bytes = BytesIO()
-        result_img.save(image_bytes, format=self._image_type)
+        result_img.save(image_bytes, format=self._save_format)
         image_str = base64.b64encode(image_bytes.getvalue()).decode("utf-8")
 
         output_serializer = data_serializer_factory(
-            category="prompt-memory-entries", data_type="image_path", extension=self._image_type
+            category="prompt-memory-entries", data_type="image_path", extension=self._file_extension
         )
         await output_serializer.save_b64_image(data=image_str)
         return ConverterResult(output_text=str(output_serializer.value), output_type="image_path")

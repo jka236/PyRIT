@@ -97,13 +97,26 @@ def test_composite_images_default_settings():
     result = converter._composite_images(base=base, overlay=overlay)
 
     assert result.size == (200, 200)
-    assert result.mode == "RGB"
+    # PNG output preserves the alpha channel
+    assert result.mode == "RGBA"
     # The top-left 50x50 region should have overlay color
     pixel_in_overlay = result.getpixel((25, 25))
-    assert pixel_in_overlay == (255, 0, 0)
+    assert pixel_in_overlay[:3] == (255, 0, 0)
     # A pixel outside the overlay region should retain base color
     pixel_outside = result.getpixel((150, 150))
-    assert pixel_outside == (255, 255, 255)
+    assert pixel_outside[:3] == (255, 255, 255)
+
+
+def test_composite_images_jpeg_base_flattens_to_rgb():
+    converter = ImageOverlayConverter(base_image="base.jpg")
+    base = Image.new("RGB", (200, 200), color=(255, 255, 255))
+    overlay = Image.new("RGBA", (50, 50), color=(255, 0, 0, 128))
+
+    result = converter._composite_images(base=base, overlay=overlay)
+
+    # JPEG output cannot carry alpha; the result must be flattened to RGB
+    assert result.mode == "RGB"
+    assert result.size == (200, 200)
 
 
 def test_composite_images_with_position():
@@ -115,10 +128,10 @@ def test_composite_images_with_position():
 
     # Pixel at the overlay position should have overlay color
     pixel_in_overlay = result.getpixel((125, 125))
-    assert pixel_in_overlay == (0, 0, 255)
+    assert pixel_in_overlay[:3] == (0, 0, 255)
     # Pixel before the overlay position should retain base color
     pixel_before = result.getpixel((50, 50))
-    assert pixel_before == (255, 255, 255)
+    assert pixel_before[:3] == (255, 255, 255)
 
 
 def test_composite_images_with_resize():
@@ -130,10 +143,10 @@ def test_composite_images_with_resize():
 
     # After resize to 100x100, pixel at (75, 75) should have overlay color
     pixel_in_resized = result.getpixel((75, 75))
-    assert pixel_in_resized == (0, 255, 0)
+    assert pixel_in_resized[:3] == (0, 255, 0)
     # Pixel at (150, 150) should remain base color
     pixel_outside = result.getpixel((150, 150))
-    assert pixel_outside == (255, 255, 255)
+    assert pixel_outside[:3] == (255, 255, 255)
 
 
 def test_composite_images_with_opacity():
@@ -144,7 +157,8 @@ def test_composite_images_with_opacity():
     result = converter._composite_images(base=base, overlay=overlay)
 
     # With 50% opacity on white overlay over black base, expect a middle gray
-    r, g, b = result.getpixel((25, 25))
+    pixel = result.getpixel((25, 25))
+    r, g, b = pixel[:3]
     assert 100 < r < 200
     assert 100 < g < 200
     assert 100 < b < 200
@@ -159,7 +173,7 @@ def test_composite_images_with_zero_opacity():
 
     # With 0 opacity, the overlay should be invisible
     pixel = result.getpixel((25, 25))
-    assert pixel == (100, 100, 100)
+    assert pixel[:3] == (100, 100, 100)
 
 
 def test_composite_images_preserves_rgba_overlay_alpha():
@@ -170,8 +184,22 @@ def test_composite_images_preserves_rgba_overlay_alpha():
     result = converter._composite_images(base=base, overlay=overlay)
 
     # Semi-transparent white overlay on black should produce a mid-gray
-    r, g, b = result.getpixel((25, 25))
+    pixel = result.getpixel((25, 25))
+    r = pixel[0]
     assert 100 < r < 200
+
+
+def test_composite_images_warns_when_overlay_out_of_bounds(caplog):
+    import logging
+
+    converter = ImageOverlayConverter(base_image="base.png", position=(500, 500))
+    base = Image.new("RGB", (200, 200), color=(255, 255, 255))
+    overlay = Image.new("RGB", (50, 50), color=(255, 0, 0))
+
+    with caplog.at_level(logging.WARNING, logger="pyrit.prompt_converter.image_overlay_converter"):
+        converter._composite_images(base=base, overlay=overlay)
+
+    assert any("falls entirely outside" in record.message for record in caplog.records) < 200
 
 
 async def test_convert_async_unsupported_input_type_raises():
@@ -283,3 +311,27 @@ async def test_convert_async_serializer_factory_called_correctly():
         assert output_call.kwargs["category"] == "prompt-memory-entries"
         assert output_call.kwargs["data_type"] == "image_path"
         assert output_call.kwargs["extension"] == "png"
+
+
+async def test_convert_async_jpeg_base_normalizes_extension_to_jpg():
+    converter = ImageOverlayConverter(base_image="my_base.jpg")
+    base_bytes = _create_image_bytes()
+    overlay_bytes = _create_image_bytes(size=(50, 50))
+
+    with patch("pyrit.prompt_converter.image_overlay_converter.data_serializer_factory") as mock_factory:
+        mock_base_serializer = AsyncMock()
+        mock_base_serializer.read_data.return_value = base_bytes
+
+        mock_overlay_serializer = AsyncMock()
+        mock_overlay_serializer.read_data.return_value = overlay_bytes
+
+        mock_output_serializer = AsyncMock()
+        mock_output_serializer.save_b64_image = AsyncMock()
+        mock_output_serializer.value = "out.jpg"
+
+        mock_factory.side_effect = [mock_base_serializer, mock_overlay_serializer, mock_output_serializer]
+
+        await converter.convert_async(prompt="overlay_img.png", input_type="image_path")
+
+        output_call = mock_factory.call_args_list[2]
+        assert output_call.kwargs["extension"] == "jpg"
